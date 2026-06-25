@@ -8,7 +8,9 @@ One folder you clone and run. It hosts **Frappe Helpdesk** for two sites:
 Both run on **one bench** (one container stack) with **fully separate databases**,
 resolved by hostname (Frappe DNS-based multitenancy). It:
 
-- uses the **official prebuilt image** `ghcr.io/frappe/helpdesk` — nothing to build,
+- uses the **official prebuilt image** pinned to **`ghcr.io/frappe/helpdesk:v1.22.1`**
+  — the newest tag that still bundles the apps (newer tags are frappe-only, see
+  [Troubleshooting](#troubleshooting)); no build step,
 - runs on the maintained **`frappe_docker`** compose files, which the scripts
   **clone for you** (`./frappe_docker`) — no folder juggling,
 - coexists with **Apache**, which keeps ports **80/443** as the public TLS edge
@@ -84,9 +86,9 @@ flowchart TD
 
 | Component | Version |
 |-----------|---------|
-| Image | `ghcr.io/frappe/helpdesk` (official, prebuilt, multi-arch) |
-| Frappe | `version-15` (what the official image ships) |
-| Helpdesk | pinned release, e.g. `v1.26.2` |
+| Image | `ghcr.io/frappe/helpdesk:v1.22.1` (official, prebuilt, multi-arch) |
+| Frappe | `version-15` |
+| Helpdesk | `v1.22.1` (newest tag that still bundles the apps) |
 | Telephony | bundled (hard dependency — see below) |
 
 **Why telephony?** It's a hard dependency of Helpdesk — `helpdesk/hooks.py`
@@ -99,7 +101,7 @@ installed automatically; ignore its UI if you don't use call features.
 | File | Purpose |
 |------|---------|
 | `.env.example` | Copy to `.env`; image tag, DB password, port, sizing. |
-| `deploy.sh` | Clone/update frappe_docker, pull image, start the stack. |
+| `deploy.sh` | Update frappe_docker, pull image, start the stack. |
 | `create-site.sh` | One-time: create **both** sites + install apps. |
 | `dc.sh` | `docker compose` wrapper (auto-clones frappe_docker; right `-f` flags). |
 | `apache/*.conf` | Apache vhosts: TLS + proxy + websockets (one per site). |
@@ -143,14 +145,16 @@ Open `https://support.testable.org/helpdesk` and
 ## Day-2 operations
 
 ### Update / upgrade (covers BOTH sites)
-Bump `CUSTOM_TAG` in `.env` to a newer release
-([tags](https://github.com/frappe/helpdesk/pkgs/container/helpdesk)), then:
+Bump `CUSTOM_TAG` in `.env` to a newer **app-bundling** tag (see Troubleshooting
+for which are safe), then:
 ```bash
 ./deploy.sh                                           # pulls new image, recreates
 ./dc.sh exec -T backend bench --site support.testable.org      migrate
 ./dc.sh exec -T backend bench --site mindssupport.testable.org migrate
 ```
-Roll back by setting `CUSTOM_TAG` to the previous version and re-running.
+⚠️ Until Frappe fixes their image CI, **don't bump past `v1.22.1`** — newer tags
+are frappe-only and will break your sites. To run newer Helpdesk before then,
+switch to building the image yourself (see Troubleshooting).
 
 ### Backups (per site — each has its own DB)
 ```bash
@@ -207,9 +211,41 @@ The `db`/`redis-*` services publish no `ports:`, so they never collide with an
 existing host MySQL or Redis. Frappe also runs its **own** Redis, separate from
 whatever your host Redis serves.
 
+## Troubleshooting
+
+**`create-site.sh` fails: "No module named 'telephony'" (or helpdesk not found).**
+The image doesn't contain the apps. On **2026-04-05** `frappe_docker` changed its
+Containerfile to read the app list only from a BuildKit **secret** (`id=apps_json`),
+but Helpdesk's CI still passes `APPS_JSON_BASE64` as a build-arg, which is now
+ignored. So every `ghcr.io/frappe/helpdesk` image built **after that date is
+frappe-only**: `v1.22.2`+, `stable`, `main`.
+
+Confirm what's in any image:
+```bash
+docker run --rm ghcr.io/frappe/helpdesk:<tag> ls apps   # want: frappe helpdesk telephony
+```
+Fixes:
+- **This setup pins `v1.22.1`** — the newest tag built *before* the break, so it
+  still bundles the apps. Don't bump past it until upstream is fixed.
+- **Want newer Helpdesk now?** Build it yourself with the secret the Containerfile
+  expects:
+  ```bash
+  printf '[{"url":"https://github.com/frappe/telephony","branch":"develop"},
+          {"url":"https://github.com/frappe/helpdesk","branch":"main"}]' > apps.json
+  git clone --depth 1 https://github.com/frappe/frappe_docker
+  DOCKER_BUILDKIT=1 docker build \
+    --build-arg=FRAPPE_BRANCH=version-15 \
+    --secret=id=apps_json,src=apps.json \
+    --tag=helpdesk-local:v15 \
+    --file=frappe_docker/images/layered/Containerfile frappe_docker
+  ```
+  then set `CUSTOM_IMAGE=helpdesk-local`, `CUSTOM_TAG=v15`, `PULL_POLICY=never` in `.env`.
+
 ## Design notes
-- **Official prebuilt image** — immutable, assets pre-compiled; upgrades are
-  `pull` + `migrate`. No build pipeline to own.
+- **Official prebuilt image, pinned to `v1.22.1`** — immutable, assets
+  pre-compiled; upgrades are `pull` + `migrate`. Pinned to the last tag that
+  bundles the apps (newer ones are frappe-only); see
+  [Troubleshooting](#troubleshooting) for the build-it-yourself escape hatch.
 - **frappe_docker compose, not a hand-rolled one** — the scripts use the
   upstream-maintained `compose.yaml` + `mariadb`/`redis`/`noproxy` overrides, so
   you track Frappe's production layout instead of a local fork.
