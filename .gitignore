@@ -1,0 +1,5 @@
+# Cloned automatically by dc.sh — not part of this repo
+frappe_docker/
+
+# Local secrets
+.env
