@@ -8,8 +8,9 @@ Production setup for **Frappe Helpdesk** serving two sites:
 Both run on **one bench** (one container stack) but have **fully separate
 databases**, resolved by hostname (Frappe DNS-based multitenancy). It:
 
-- runs as an **immutable Docker image** (apps baked at build time — the official
-  `frappe_docker` production pattern, *not* the dev `bench start` demo),
+- runs the **official prebuilt image** `ghcr.io/frappe/helpdesk` (immutable, apps
+  + assets baked in — the `frappe_docker` production pattern, *not* the dev
+  `bench start` demo); nothing to build or maintain,
 - coexists with future **other Frappe instances** on the same server,
 - coexists with **Apache**, which keeps owning ports **80/443** as the public
   TLS edge and reverse-proxies to Frappe.
@@ -80,9 +81,10 @@ needs no new ports — just another vhost.
 
 | Component   | Version            |
 |-------------|--------------------|
-| Frappe      | `version-16`       |
-| Helpdesk    | `main`             |
+| Frappe      | `version-15` (from the official image) |
+| Helpdesk    | pinned release, e.g. `v1.26.2` (`main` line) |
 | Telephony   | `develop`          |
+| Image       | `ghcr.io/frappe/helpdesk` (official, prebuilt) |
 
 **Why telephony?** It is a hard dependency of Helpdesk — `helpdesk/hooks.py`
 declares `required_apps = ["telephony"]` and `pyproject.toml` pins
@@ -93,8 +95,6 @@ It's installed automatically; ignore its UI if you don't use call features.
 
 | File | Purpose |
 |------|---------|
-| `apps.json` | Apps baked into the image (frappe comes from build args). |
-| `build.sh` | Build the custom `helpdesk:v16` image. |
 | `deploy.sh` | Bring up MariaDB + Traefik + the helpdesk bench. |
 | `create-site.sh` | One-time: create **both** sites + install apps. |
 | `gitops/mariadb.env` | Shared DB root password. |
@@ -107,6 +107,24 @@ It's installed automatically; ignore its UI if you don't use call features.
 
 ---
 
+## The image (official, prebuilt — no build needed)
+
+Frappe publishes a ready-to-use **production** image at
+**`ghcr.io/frappe/helpdesk`** — its CI builds `frappe version-15 + helpdesk +
+telephony` (assets pre-compiled) from the same `frappe_docker` Containerfile you
+would otherwise run yourself. It's a **public** package, so there's no build
+pipeline, no registry auth, nothing to maintain — the server just pulls it.
+
+- `gitops/helpdesk.env` already points at `ghcr.io/frappe/helpdesk`.
+- Pin a release tag (e.g. `CUSTOM_TAG=v1.26.2`) for reproducibility; `stable` is
+  the latest `main` build. Tags: <https://github.com/frappe/helpdesk/pkgs/container/helpdesk>
+- Multi-arch (amd64 + arm64), so it runs on Intel and ARM hosts alike.
+
+> Trade-off: the official image tracks Frappe **version-15** (the line Helpdesk
+> is tested against). If you ever need version-16 or extra apps in the image,
+> you'd switch to a self-built image — but for plain Helpdesk this is the
+> simplest, most maintainable path.
+
 ## Deploy (on the server)
 
 ### 0. Prereqs
@@ -118,33 +136,28 @@ hostnames pointing at the server.
 ```bash
 git clone https://github.com/frappe/frappe_docker
 cd frappe_docker
-cp /path/to/this/apps.json .          # build context needs apps.json
-# keep gitops/ build.sh deploy.sh create-site.sh apache/ next to the clone
+# keep gitops/ deploy.sh create-site.sh apache/ next to the clone.
+# (frappe_docker is needed for its compose.yaml + overrides, NOT for building.)
 ```
 
-### 2. Build the image
-```bash
-./build.sh          # frappe version-16 + helpdesk main + telephony develop
-```
-
-### 3. Fill in secrets
+### 2. Fill in secrets
 Edit `gitops/mariadb.env`, `gitops/traefik.env`, `gitops/helpdesk.env`
 (the DB password must match in mariadb.env and helpdesk.env). Traefik dashboard
 auth: `htpasswd -nbB admin 'pw'`, then double every `$` in the hash.
 
-### 4. Start the stack
+### 3. Start the stack
 ```bash
-./deploy.sh
+./deploy.sh          # pulls ghcr.io/frappe/helpdesk automatically (PULL_POLICY=always)
 ```
 
-### 5. Create both sites (first run only)
+### 4. Create both sites (first run only)
 ```bash
 ADMIN_PASSWORD='set-a-strong-one' \
 DB_ROOT_PASSWORD='same-as-mariadb.env' \
 ./create-site.sh
 ```
 
-### 6. Wire up Apache (both domains)
+### 5. Wire up Apache (both domains)
 ```bash
 sudo a2enmod proxy proxy_http proxy_wstunnel ssl rewrite headers      # Debian/Ubuntu
 sudo cp apache/support.testable.org.conf      /etc/apache2/sites-available/
@@ -162,15 +175,21 @@ Open `https://support.testable.org/helpdesk` and
 ## Day-2 operations
 
 ### Update / upgrade (covers BOTH sites)
+Bump `CUSTOM_TAG` in `gitops/helpdesk.env` to the new release (check the
+[tags](https://github.com/frappe/helpdesk/pkgs/container/helpdesk)), then pull +
+recreate + migrate:
 ```bash
-./build.sh                                   # rebuild image with latest app code
 docker compose -p helpdesk --env-file gitops/helpdesk.env \
   -f compose.yaml -f overrides/compose.redis.yaml \
-  -f overrides/compose.multi-bench.yaml up -d   # recreate with new image
+  -f overrides/compose.multi-bench.yaml pull        # fetch new image from GHCR
+docker compose -p helpdesk --env-file gitops/helpdesk.env \
+  -f compose.yaml -f overrides/compose.redis.yaml \
+  -f overrides/compose.multi-bench.yaml up -d        # recreate with new image
 docker compose -p helpdesk exec backend bench --site support.testable.org      migrate
 docker compose -p helpdesk exec backend bench --site mindssupport.testable.org migrate
 ```
-For reproducible builds, pin `FRAPPE_BRANCH=v16.x.y` and tags in `apps.json`.
+Pinning a release tag (not `stable`) keeps rollouts reproducible and lets you
+roll back by setting `CUSTOM_TAG` to the previous version.
 
 ### Backups (per site — each has its own DB)
 ```bash
@@ -185,10 +204,11 @@ Append the hostname to `SITES_RULE` in `gitops/helpdesk.env`, `up -d` again,
 create the site, add an Apache vhost. No new containers.
 
 ### Add a *different* Frappe app instance later (separate bench)
-New `apps.json` + image, a new env file with a different `ROUTER` and
-`SITES_RULE`, run the helpdesk-style stack as a new project, add an Apache
-vhost (still upstream `127.0.0.1:8080` — Traefik routes it). MariaDB and Traefik
-are already shared; don't restart them.
+Point its env at that app's image — another official one (e.g. `frappe/crm` on
+GHCR) or a self-built image if no official one exists — then a new env file with
+a different `ROUTER` and `SITES_RULE`, run the helpdesk-style stack as a new
+project, and add an Apache vhost (still upstream `127.0.0.1:8080` — Traefik
+routes it). MariaDB and Traefik are already shared; don't restart them.
 
 ## Persistence: where files and databases live
 
