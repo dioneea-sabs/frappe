@@ -33,6 +33,46 @@ databases**, resolved by hostname (Frappe DNS-based multitenancy). It:
         shared MariaDB (mariadb-database)   <-- one DB engine, two databases
 ```
 
+```mermaid
+flowchart TD
+    net([Internet])
+
+    subgraph edge["Apache — public edge (:80 / :443, TLS via certbot)"]
+        v1["vhost: support.testable.org"]
+        v2["vhost: mindssupport.testable.org"]
+        v3["vhosts: your existing Apache sites"]
+    end
+
+    traefik["Traefik router<br/>127.0.0.1:8080 (localhost only, no TLS)<br/>routes by Host header"]
+
+    subgraph bench["Helpdesk bench — one container stack"]
+        fe["nginx frontend<br/>resolves site from Host"]
+        gunicorn["gunicorn (backend)"]
+        socketio["socketio (websockets)"]
+        workers["workers + scheduler"]
+        redis[("redis cache + queue")]
+    end
+
+    subgraph db["shared MariaDB (mariadb-database)"]
+        db1[("DB: support.testable.org")]
+        db2[("DB: mindssupport.testable.org")]
+    end
+
+    served["served directly by Apache"]
+
+    net --> edge
+    v1 -- "preserve Host + ws tunnel" --> traefik
+    v2 -- "preserve Host + ws tunnel" --> traefik
+    v3 --> served
+    traefik --> fe
+    fe --> gunicorn
+    fe --> socketio
+    gunicorn --> workers
+    fe -. uses .-> redis
+    gunicorn -- "Host = support.testable.org" --> db1
+    gunicorn -- "Host = mindssupport.testable.org" --> db2
+```
+
 Why Traefik when Apache is already the edge? It's the single internal entry
 point: every Apache vhost proxies to the same `127.0.0.1:8080` and Traefik
 routes by hostname. When you add the *other* Frappe instances later, Apache
