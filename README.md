@@ -103,6 +103,7 @@ installed automatically; ignore its UI if you don't use call features.
 | `.env.example` | Copy to `.env`; image tag, DB password, port, sizing. |
 | `deploy.sh` | Update frappe_docker, pull image, start the stack. |
 | `create-site.sh` | One-time: create **both** sites + install apps. |
+| `destroy.sh` | ☢️ **Permanently** delete this stack + all its volumes (scoped to project `helpdesk`). |
 | `dc.sh` | `docker compose` wrapper (auto-clones frappe_docker; right `-f` flags). |
 | `apache/*.conf` | Apache vhosts: TLS + proxy + websockets (one per site). |
 | `frappe_docker/` | Cloned automatically by the scripts — **not** committed (gitignored). |
@@ -174,6 +175,16 @@ useless without it).
 ```
 Add an Apache vhost (copy one of the existing ones, change `ServerName` + cert).
 No new containers.
+
+### Reset / tear down (DANGER — erases data)
+```bash
+./destroy.sh                 # asks you to type "erase helpdesk"; then deletes
+                             # all helpdesk containers, networks, and VOLUMES
+                             # (both DBs + all uploaded files — irreversible)
+FORCE=1 ./destroy.sh         # skip the prompt (automation)
+```
+Scoped to the `helpdesk` project only — your other Docker stacks, host
+MySQL/Redis, and Apache are untouched. Redeploy with `./deploy.sh && ./create-site.sh`.
 
 ## Persistence: where files and databases live
 
