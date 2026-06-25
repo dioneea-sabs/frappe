@@ -190,6 +190,38 @@ New `apps.json` + image, a new env file with a different `ROUTER` and
 vhost (still upstream `127.0.0.1:8080` — Traefik routes it). MariaDB and Traefik
 are already shared; don't restart them.
 
+## Coexistence on the shared host (port map)
+
+This stack is built to sit next to existing services (Apache, and — as you
+noted — an existing host **MySQL** and/or **Redis**). The rule: **nothing in the
+Frappe stack publishes a public host port.** The only host binding is Apache's
+(already yours) plus a single loopback-only port for the internal router.
+
+| Host port | Bound by this stack? | Used by | Conflict with your existing service? |
+|-----------|----------------------|---------|--------------------------------------|
+| `80` / `443` | No (Apache already owns them) | your Apache edge | — none; Frappe never binds these |
+| `127.0.0.1:8080` | **Yes — loopback only** | internal Traefik router | none; not your existing MySQL/Redis/Apache |
+| `3306` (MySQL) | **No** | container MariaDB, internal `mariadb-network` only | **none** — your host MySQL keeps `:3306` |
+| `6379` (Redis) | **No** | container redis-cache + redis-queue, internal to the bench network | **none** — your host Redis keeps `:6379` |
+
+Why there's no clash with your existing **MySQL** and **Redis**: the
+`compose.mariadb-shared.yaml` and `compose.redis.yaml` overrides declare **no
+`ports:` mappings**, so those containers are reachable only on Docker networks
+(`mariadb-database:3306`, `redis-cache:6379`, `redis-queue:6379`) — never on the
+host's `0.0.0.0`. Each Frappe bench also runs its **own** Redis pair, fully
+separate from whatever your host Redis is doing (no shared keyspace, no
+`SELECT db` collisions).
+
+> ⚠️ The only way to create a conflict is to add a `ports:` line that publishes
+> 3306 or 6379 (or to set `network_mode: host`) on the DB/Redis/Traefik
+> services. Don't. If you need host access for debugging, publish on a *spare*
+> port, e.g. `"3307:3306"` / `"6380:6379"`.
+
+Reuse-the-host-service is possible but **not recommended**: Frappe officially
+targets **MariaDB** (MySQL 8 has `utf8mb4`/collation quirks), and a shared Redis
+couples Frappe's cache/queue lifecycle to your other apps. Keeping dedicated,
+internal containers is the maintained best practice and what these files do.
+
 ## Design notes
 - **Immutable image, not `bench get-app` at runtime** — production images ship
   with assets pre-compiled; you can't change app code in a running container.
