@@ -190,6 +190,61 @@ New `apps.json` + image, a new env file with a different `ROUTER` and
 vhost (still upstream `127.0.0.1:8080` — Traefik routes it). MariaDB and Traefik
 are already shared; don't restart them.
 
+## Persistence: where files and databases live
+
+Nothing important lives *inside* a container — the immutable images are
+disposable. All state is in **Docker named volumes**, so rebuilds/upgrades never
+lose data.
+
+### Uploaded files (filesystem)
+Frappe stores attachments on disk, not in the DB (the DB only holds a `File`
+metadata row). Both sites share one `sites` volume; isolation is by directory:
+
+```
+sites/                                 (volume: helpdesk_sites)
+├── support.testable.org/
+│   ├── public/files/     ← public attachments (nginx serves directly)
+│   ├── private/files/    ← private attachments (permission-checked)
+│   └── site_config.json  ← per-site DB name + DB password + ENCRYPTION KEY
+├── mindssupport.testable.org/
+│   ├── public/files/
+│   ├── private/files/
+│   └── site_config.json
+└── common_site_config.json
+```
+
+### Databases (one server, one DB per site)
+There is **one** MariaDB server (one data volume), and **each site gets its own
+separate database** inside it — created by `bench new-site` with an
+auto-generated name (e.g. `_a1b2c3…`). The site's DB name, DB user, and DB
+password are recorded in that site's `site_config.json`. So data isolation is at
+the *database* level, even though both DBs share the same storage volume.
+
+```
+MariaDB server (container mariadb-database)   →  volume: mariadb_db-data  (/var/lib/mysql)
+   ├── database for support.testable.org       (own name/user/password)
+   └── database for mindssupport.testable.org  (own name/user/password)
+```
+
+### Volume map
+| Host volume | Project | Mounted at | Holds |
+|-------------|---------|-----------|-------|
+| `helpdesk_sites` | helpdesk | `/home/frappe/frappe-bench/sites` | uploads (public/private), each site's `site_config.json` (incl. **encryption key**), backups |
+| `mariadb_db-data` | mariadb | `/var/lib/mysql` | **all** site databases (one per site) |
+| `helpdesk_redis-queue-data` | helpdesk | `/data` | queued background jobs (redis-queue) |
+| *(redis-cache)* | helpdesk | — | none — cache is ephemeral by design |
+
+> 💾 **Back up both `helpdesk_sites` and `mariadb_db-data` off-box.** DB without
+> the matching `sites/<site>/site_config.json` is useless — the encryption key
+> there is what decrypts stored secrets. `bench backup --with-files` bundles
+> DB+files per site (lands in `sites/<site>/private/backups/`); copy that, or the
+> two volumes, somewhere off the server.
+
+> ⚠️ Inspect volumes with `docker volume ls` / `docker volume inspect <name>`.
+> Removing a volume (`docker volume rm`, `docker compose down -v`) **deletes the
+> data permanently** — `down -v` on the helpdesk or mariadb project wipes files
+> or databases. Use plain `down` (no `-v`) for routine stop/recreate.
+
 ## Coexistence on the shared host (port map)
 
 This stack is built to sit next to existing services (Apache, and — as you
